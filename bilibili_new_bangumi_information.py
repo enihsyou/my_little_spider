@@ -22,7 +22,7 @@ js = []
 
 if os.path.exists("bilibili_new_bangumi_information"):
     print("文件存在")
-    file = open("bilibili_new_bangumi_information", "w+", encoding='utf-8')
+    file = open("bilibili_new_bangumi_information", "wa", encoding='utf-8')
 else:
     file = open("bilibili_new_bangumi_information", "w", encoding='utf-8')
 

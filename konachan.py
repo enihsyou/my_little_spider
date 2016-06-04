@@ -47,6 +47,11 @@ re_valid_path = re.compile(r"[:<>\"/\\\|\?\*]")
 total_pic_count = 0  # 总共获取了多少图片的信息
 json_body = []  # 需要一起写入到文件的信息
 
+pics_limit = -1
+page_limit = -1
+bool_download_thumb = False
+bool_download_large_img = False
+
 
 def _make_soup(response):
     """只是生成一个BeautifulSoup对象
@@ -94,7 +99,6 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         None: 跳出
     """
     global total_pic_count
-    pic_count = 0
     pic_body = soup.find("ul", id="post-list-posts")  # 图片存在的主体
     paginator = soup.find("div", id="paginator")  # 页面导航栏
     current_page = paginator.div.find("em", class_="current").text  # 当前页面，数字
@@ -111,9 +115,8 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
 
     for pic in pics:
         if pic is None: break
-        if pic_count == pics_limit: break
+        if total_pic_count == pics_limit: break
         total_pic_count += 1
-        pic_count += 1
         information = OrderedDict()
 
         thumb = pic.find("a", class_="thumb")  # type: bs4.Tag 图片的缩略图链接
@@ -145,7 +148,7 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         if bool_download_large_img:
             download_img(direct_link, [pic_id, tag], ".jpg")  # 下载jpg大图
 
-    if pic_count == pics_limit or next_page == page_limit + 1:  # 达到跳出条件
+    if total_pic_count == pics_limit or next_page == page_limit + 1:  # 达到跳出条件
         print("已经获取{}页数据 {}张图片，完成 跳出".format(current_page, total_pic_count))
         return
     else:  # 没什么事情就继续爬下一页
@@ -222,27 +225,26 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
 
 
 if __name__ == "__main__":
-    pics_limit = input("设定图数\n>>>")
-    page_limit = input("设定页数\n>>>")
-    bool_download_thumb = input("是否同时下载缩略图[y/n]\n>>>")
-    bool_download_large_img = input("是否同时下载jpg大图[y/n]\n>>>")
+    pics_limit = -1
+    page_limit = -1
+    bool_download_thumb = False
+    bool_download_large_img = False
+
+    _pics_limit = input("设定图数\n>>>")
+    _page_limit = input("设定页数\n>>>")
+    _download_thumb = input("是否同时下载缩略图[y/n]\n>>>")
+    _download_large_img = input("是否同时下载jpg大图[y/n]\n>>>")
 
     # 转换字符串到数字
-    if pics_limit:
-        pics_limit = int(pics_limit)
-    else:
-        pics_limit = -1
-    if page_limit:
-        page_limit = int(page_limit)
-    else:
-        page_limit = -1
+    if _pics_limit: pics_limit = int(_pics_limit)
+    if _page_limit: page_limit = int(_page_limit)
 
     # 处理要下载文件时的必要事件
-    if bool_download_thumb.lower() in ["y", "yes", "shi", "do", ""]:
+    if _download_thumb.lower() in ["y", "yes", "shi", "do", ""]:
         bool_download_thumb = True
         if not os.path.exists(thumb_dir_name):
             os.mkdir(thumb_dir_name)
-    if bool_download_large_img.lower() in ["y", "yes", "shi", "do", ""]:
+    if _download_large_img.lower() in ["y", "yes", "shi", "do", ""]:
         bool_download_large_img = True
         if not os.path.exists(large_img_dir_name):
             os.mkdir(large_img_dir_name)

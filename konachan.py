@@ -15,9 +15,11 @@ from collections import OrderedDict
 import bs4
 import requests
 from bs4 import BeautifulSoup
+from colorama import init as colorama
+from termcolor import colored
 
 session = requests.Session()
-
+colorama()
 # 字段定义
 base_url = "http://konachan.com"
 data_file_name = "konachan.json"  # 需要保存的文件名
@@ -82,7 +84,7 @@ def get_data(page):
     try:
         r = session.get(base_url + "/post", params={"page": page})
     except Exception as ERROR:
-        print(ERROR)
+        print(colored(ERROR, "red"))
         raise ERROR
     return _make_soup(r)
 
@@ -102,7 +104,7 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
     pic_body = soup.find("ul", id="post-list-posts")  # 图片存在的主体
     paginator = soup.find("div", id="paginator")  # 页面导航栏
     current_page = paginator.div.find("em", class_="current").text  # 当前页面，数字
-    print("当前页面: {}".format(current_page))
+    print(colored("当前页面: {}".format(current_page), "blue"))
 
     next_page_href = paginator.find("a", class_="next_page")["href"]  # 下一页的链接
 
@@ -140,6 +142,7 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         information["大图URL"] = direct_link
         information["分辨率"] = direct_link_resolution
         print(information)
+
         json_body.append(information)
         if bool_download_thumb:
             download_img(
@@ -149,10 +152,11 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
             download_img(direct_link, [pic_id, tag], ".jpg")  # 下载jpg大图
 
     if total_pic_count == pics_limit or next_page == page_limit + 1:  # 达到跳出条件
-        print("已经获取{}页数据 {}张图片，完成 跳出".format(current_page, total_pic_count))
+        print(colored("已经获取{}页数据 {}张图片，完成 跳出".format(
+                current_page, total_pic_count), "magenta"))
         return
     else:  # 没什么事情就继续爬下一页
-        print("\n下一页面: {}\n".format(next_page))
+        print(colored("\n下一页面: {}\n".format(next_page), "blue"))
         dump_info(get_data(next_page), pics_limit=pics_limit,
                   page_limit=page_limit)
 
@@ -206,22 +210,24 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
     try:
         data = session.get(base_url + url).content
     except Exception as ERROR:
-        print(ERROR)
+        print(colored(ERROR, "red"))
         raise ERROR
     base_url_host_name = re_host_name.search(base_url).group(1)
     file_name = [re_valid_path.sub("_", a) for a in file_name]
-    file_name = " ".join(map(str, [base_url_host_name] + file_name))[:210] + suffix  # 长于210字符的会被切断
+    file_name = " ".join(map(str, [base_url_host_name] + file_name))[
+                :210] + suffix  # 长于210字符的会被切断
     if thumb:
         file_path = os.path.join("./" + thumb_dir_name, file_name)
     else:
         file_path = os.path.join("./" + large_img_dir_name, file_name)
 
     if os.path.exists(file_path):  # 处理同名文件
-        print("同名文件已存在，覆盖")
+        print(colored("同名文件已存在，覆盖", "yellow"))
     with open(file_path, "wb") as _file:
         bytes_write = _file.write(data)
     file_size = size_format(bytes_write)
-    print("下载成功(大小: {}): {}".format(file_size, file_name))
+    print(colored(
+            "下载成功(大小: {}): {}".format(file_size, file_name), "green"))
 
 
 if __name__ == "__main__":
@@ -255,7 +261,9 @@ if __name__ == "__main__":
     # 判断要写入的文件是否存在
     write_mode = "a"
     if os.path.exists(data_file_name):
-        bool_override = input("文件已存在，是否覆盖？[y/n]\n>>>")
+        bool_override = input(
+                colored("文件 {} 已存在，是否覆盖？[y/n]\n>>>".format(data_file_name),
+                        "yellow"))
         if bool_override.lower() in ["y", "yes", "shi", "do", ""]:
             write_mode = "w"
 
@@ -263,5 +271,5 @@ if __name__ == "__main__":
     with open(data_file_name, write_mode) as file:
         json.dump(json_body, file, indent=True, ensure_ascii=False)  # 写入文件
 
-    print("\n写入完成…")
+    print(colored("\n写入 {} 完成…".format(data_file_name), "green"))
     os.system("pause")

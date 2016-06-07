@@ -4,7 +4,7 @@ File name: konachan
 Reference:
 Introduction: 下载konachan.com上面的图片的小爬虫
 Date: 2016-06-04
-Last modified: 2016-06-04
+Last modified: 2016-06-07
 Author: enihsyou
 """
 import json
@@ -15,11 +15,10 @@ from collections import OrderedDict
 import bs4
 import requests
 from bs4 import BeautifulSoup
-from colorama import init as colorama
 from termcolor import colored
 
 session = requests.Session()
-colorama()
+
 # 字段定义
 base_url = "http://konachan.com"
 data_file_name = "konachan.json"  # 需要保存的文件名
@@ -39,20 +38,22 @@ session.headers.update({
 # 代理设置
 session.proxies.update({"http": "http://localhost:8087"})  # 本地代理，使用GAE:8087
 
-re_title_tag = re.compile(r"Tags: (.+) User")  # 抓取出tag内容
-re_page_number = re.compile(r"page=(\d+)")  # 抓取出page，当前页数
-re_pic_id = re.compile(r"/(\d+?)/")  # 抓取出图片id
-re_pics_class = re.compile(r"creator-id-\d*")  # 图片的所在位置的class
-re_base_url = re.compile("^" + base_url)  # 用于去除http://hostname.xxx开头
-re_host_name = re.compile(r"(?<=http://)?([^/]+?)\..+/?")  # 捕获次级域名
-re_valid_path = re.compile(r"[:<>\"/\\\|\?\*]")
+# 正则表达式搜索定义
+RE_TITLE_TAG = re.compile(r"Tags: (.+) User")  # 抓取出tag内容
+RE_PAGE_NUMBER = re.compile(r"page=(\d+)")  # 抓取出page，当前页数
+RE_PIC_ID = re.compile(r"/(\d+?)/")  # 抓取出图片id
+RE_PICS_CLASS = re.compile(r"creator-id-\d*")  # 图片的所在位置的class
+RE_BASE_URL = re.compile("^" + base_url)  # 用于去除http://hostname.xxx开头
+RE_HOST_NAME = re.compile(r"(?<=http://)?([^/]+?)\..+/?")  # 捕获次级域名
+RE_VALID_PATH = re.compile(r"[:<>\"/\\\|\?\*]")
+
+# 参数定义
 total_pic_count = 0  # 总共获取了多少图片的信息
 json_body = []  # 需要一起写入到文件的信息
-
-pics_limit = -1
-page_limit = -1
-bool_download_thumb = False
-bool_download_large_img = False
+pics_limit = -1  # 限制获取的图片数量
+page_limit = -1  # 限制获取的页面数量
+bool_download_thumb = False  # 是否同时下载缩略图
+bool_download_large_img = False  # 是否同时下载大图
 
 
 def _make_soup(response):
@@ -82,11 +83,13 @@ def get_data(page):
         Exception (ERROR): 连接出问题
     """
     try:
-        r = session.get(base_url + "/post", params={"page": page})
+        response = session.get(base_url + "/post", params={"page": page})
+        response.raise_for_status()
     except Exception as ERROR:
         print(colored(ERROR, "red"))
         raise ERROR
-    return _make_soup(r)
+
+    return _make_soup(response)
 
 
 def dump_info(soup, pics_limit=-1, page_limit=-1):
@@ -111,9 +114,9 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
     if next_page_href is None:  # 抵达最后一页
         next_page = 0
     else:
-        next_page = int(re_page_number.search(next_page_href).group(1))
+        next_page = int(RE_PAGE_NUMBER.search(next_page_href).group(1))
 
-    pics = pic_body.find_all("li", class_=re_pics_class)  # 所有图片列表
+    pics = pic_body.find_all("li", class_=RE_PICS_CLASS)  # 所有图片列表
 
     for pic in pics:
         if pic is None: break
@@ -126,8 +129,8 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         thumb_img = thumb.img  # type: bs4.Tag 图片的缩略图tag
         thumb_img_src = cut_base_url(thumb_img["src"])  # 图片的缩略图的URL
         thumb_img_title = thumb_img["title"]  # 图片的tag标题
-        tag = re_title_tag.search(thumb_img_title).group(1)  # 取出tag
-        pic_id = re_pic_id.search(pic_page).group(1)  # 图片在站点上的id
+        tag = RE_TITLE_TAG.search(thumb_img_title).group(1)  # 取出tag
+        pic_id = RE_PIC_ID.search(pic_page).group(1)  # 图片在站点上的id
         direct_link = cut_base_url(
                 pic.find("a", class_="directlink")["href"])  # 默认大图的链接
         direct_link_resolution = pic.find(
@@ -171,7 +174,7 @@ def cut_base_url(url):
         (str): 去除了base_link的url
     """
     if url.startswith(base_url):
-        return re_base_url.sub("", url)
+        return RE_BASE_URL.sub("", url)
     else:
         return url
 
@@ -212,8 +215,8 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
     except Exception as ERROR:
         print(colored(ERROR, "red"))
         raise ERROR
-    base_url_host_name = re_host_name.search(base_url).group(1)
-    file_name = [re_valid_path.sub("_", a) for a in file_name]
+    base_url_host_name = RE_HOST_NAME.search(base_url).group(1)
+    file_name = [RE_VALID_PATH.sub("_", a) for a in file_name]
     file_name = " ".join(map(str, [base_url_host_name] + file_name))[
                 :210] + suffix  # 长于210字符的会被切断
     if thumb:
@@ -231,11 +234,6 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
 
 
 if __name__ == "__main__":
-    pics_limit = -1
-    page_limit = -1
-    bool_download_thumb = False
-    bool_download_large_img = False
-
     _pics_limit = input("设定图数\n>>>")
     _page_limit = input("设定页数\n>>>")
     _download_thumb = input("是否同时下载缩略图[y/n]\n>>>")

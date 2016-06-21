@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 from collections import OrderedDict
+from time import perf_counter
 
 import bs4
 import requests
@@ -49,11 +50,13 @@ RE_VALID_PATH = re.compile(r"[:<>\"/\\\|\?\*]")
 
 # 参数定义
 total_pic_count = 0  # 总共获取了多少图片的信息
+start_page = 1  # 起始页面
 json_body = []  # 需要一起写入到文件的信息
 pics_limit = -1  # 限制获取的图片数量
 page_limit = -1  # 限制获取的页面数量
 bool_download_thumb = False  # 是否同时下载缩略图
 bool_download_large_img = False  # 是否同时下载大图
+start_time = 0  # 处理开始的时间
 
 # 连接数据库
 database = sqlite3.connect(":memory:")
@@ -100,7 +103,10 @@ def get_data(page):
     Raises:
         Exception (ERROR): 连接出问题
     """
+    global start_time
+    if page == -1: return -1  # 退出
     try:
+        start_time = perf_counter()  # 处理开始的时间
         response = session.get(base_url + "/post", params={"page": page})
         response.raise_for_status()
     except Exception as ERROR:
@@ -122,17 +128,18 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         None: 跳出
     """
     global total_pic_count
+    if soup == -1: return  # 退出
     pic_body = soup.find("ul", id="post-list-posts")  # 图片存在的主体
     paginator = soup.find("div", id="paginator")  # 页面导航栏
     current_page = paginator.div.find("em", class_="current").text  # 当前页面，数字
     print(colored("当前页面: {}".format(current_page), "blue"))
 
-    next_page_href = paginator.find("a", class_="next_page")["href"]  # 下一页的链接
+    next_page_href = paginator.find("a", class_="next_page")  # 下一页的链接
 
-    if next_page_href is None:  # 抵达最后一页
-        next_page = 0
+    if next_page_href is not None:  # 未抵达最后一页
+        next_page = int(RE_PAGE_NUMBER.search(next_page_href["href"]).group(1))
     else:
-        next_page = int(RE_PAGE_NUMBER.search(next_page_href).group(1))
+        next_page = -1
 
     pics = pic_body.find_all("li", class_=RE_PICS_CLASS)  # 所有图片列表
 
@@ -183,14 +190,16 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         if bool_download_large_img:
             download_img(direct_img_link, [pic_id, tags], ".jpg")  # 下载jpg大图
 
-        if total_pic_count == pics_limit or next_page == page_limit + 1:  # 达到跳出条件
-            print(colored("已经获取{}页数据 {}张图片，完成 跳出".format(
-                    current_page, total_pic_count), "magenta"))
-            return
+        # 跳出条件检测
+        if total_pic_count == pics_limit or next_page == page_limit + 1:
+            return current_page, total_pic_count, perf_counter() - running_time
     else:  # 没什么事情就继续爬下一页
-        print(colored("\n下一页面: {}\n".format(next_page), "blue"))
-        dump_info(get_data(next_page), pics_limit=pics_limit,
-                  page_limit=page_limit)
+        if next_page_href is None:
+            return current_page, total_pic_count, perf_counter() - running_time
+        print(colored("\n下一页面: {}  {} s\n".format(
+                next_page, perf_counter() - start_time), "blue"))
+        return dump_info(get_data(next_page), pics_limit=pics_limit,
+                         page_limit=page_limit)
 
 
 def update_database(information_dict, cursor=cursor):
@@ -208,7 +217,7 @@ def update_database(information_dict, cursor=cursor):
                     '"' + information_dict["thumb_img_URL"] + '"',
                     '"' + information_dict["resolution"] + '"',
                     information_dict["height"],
-                    information_dict["width"],
+                    information_dict["width"]
             )
     )
 
@@ -260,6 +269,7 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
         Exception (ERROR): 连接出问题
     """
     try:
+        start_time = perf_counter()
         data = session.get(base_url + url).content
     except Exception as ERROR:
         print(colored(ERROR, "red"))
@@ -279,7 +289,9 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
         bytes_write = _file.write(data)
     file_size = format_size(bytes_write)
     print(colored(
-            "下载成功(大小: {}): {}".format(file_size, file_name), "green"))
+            "下载成功(大小: {} {}s): {}".format(
+                    file_size, perf_counter() - start_time, file_name),
+            "green"))
 
 
 if __name__ == "__main__":
@@ -302,8 +314,13 @@ if __name__ == "__main__":
         if not os.path.exists(large_img_dir_name):
             os.mkdir(large_img_dir_name)
 
-    dump_info(get_data(base_url + "/post"), pics_limit=pics_limit,
-              page_limit=page_limit)  # 启动爬虫
+    running_time = perf_counter()  # 启动时间
+
+    # 启动爬虫
+    a, b, c = dump_info(get_data(start_page), pics_limit=pics_limit,
+                        page_limit=page_limit)
+    print(colored("已经获取{}页数据 {}张图片，完成\n--- {} seconds ---".format(
+            a, b, c), "magenta"))
 
     # 判断要写入的文件是否存在
     write_mode = "a"
@@ -315,15 +332,21 @@ if __name__ == "__main__":
             write_mode = "w"
 
     # 保存信息到json
+    start_time = perf_counter()
     with open(data_file_name, write_mode) as file:
-        json.dump(json_body, file, indent=True, ensure_ascii=False)  # 写入文件
+        json.dump(json_body, file, indent=True)  # 写入文件
 
-    print(colored("写入 {} 完成…".format(data_file_name), "green"))
+    print(colored(
+            "写入 {} 完成… {}s".format(data_file_name, perf_counter() - start_time),
+            "green"))
 
     # 保存信息到sqlite3
+    start_time = perf_counter()
     database.commit()
     with sqlite3.connect(database_file_name) as db:
+        db.execute("DROP TABLE IF EXISTS konachan")
         db.executescript("".join(database.iterdump()))
-    print(colored("写入 {} 完成…".format(database_file_name), "green"))
+    print(colored("写入 {} 完成… {}s".format(database_file_name,
+                                         perf_counter() - start_time), "green"))
 
 os.system("pause")

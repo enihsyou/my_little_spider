@@ -58,7 +58,7 @@ download_thumb = False  # 是否同时下载缩略图
 download_large_img = False  # 是否同时下载大图
 start_time = 0  # 处理开始的时间
 cache_pages = 0  # 缓存中的页面数量
-cache_limit = 50  # 写入文件需要达到的缓存数量
+cache_limit = 200  # 写入文件需要达到的缓存数量
 result = []  # 包含下一页的信息或者退出的信息
 
 # 连接数据库
@@ -180,17 +180,19 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         information["sample_img_URL"] = direct_img_link
         information["thumb_img_URL"] = thumb_img_src
         information["resolution"] = direct_link_resolution
-        information["height"] = int(direct_link_resolution.split(" x ")[0])
-        information["width"] = int(direct_link_resolution.split(" x ")[1])
+        information["width"] = int(direct_link_resolution.split(" x ")[0])
+        information["height"] = int(direct_link_resolution.split(" x ")[1])
 
         # 打印当前信息
         print(information["id"], information["information_link"])
 
-        # json信息添加
-        json_body.append(information)
-
-        # 数据库信息添加
-        update_database(information)
+        try:
+            # 数据库信息添加
+            update_database(information)
+            # json信息添加
+            json_body.append(information)
+        except sqlite3.IntegrityError:  # 可能由于服务器更新了新的图片
+            pass
 
         # 下载
         if download_thumb:  # 下载缩略图
@@ -203,7 +205,7 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         if total_pic_count == pics_limit:
             return current_page - start_page + 1, total_pic_count, perf_counter() - running_time, -1
     # 没什么事情就继续爬下一页
-    if next_page_href is None or next_page >= page_limit:
+    if next_page_href is None or next_page == page_limit + 1:
         return current_page - start_page + 1, total_pic_count, perf_counter() - running_time, -1
     print(colored("\n下一页面: {}  {} s\n".format(
             next_page, perf_counter() - start_time), "blue"))
@@ -228,8 +230,8 @@ def update_database(information_dict, cursor=cursor):
                                                                     "''") + "'",
                     "'" + information_dict["resolution"].replace("'",
                                                                  "''") + "'",
-                    information_dict["height"],
-                    information_dict["width"]
+                    information_dict["width"],
+                    information_dict["height"]
             )
     )
 

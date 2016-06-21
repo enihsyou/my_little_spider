@@ -23,7 +23,7 @@ session = requests.Session()
 
 # 字段定义
 base_url = "http://konachan.com"
-data_file_name = "konachan.json"  # 保存的json文件名
+json_file_name = "konachan.json"  # 保存的json文件名
 database_file_name = "konachan.sqlite3"  # 保存的sqlite3文件名
 thumb_dir_name = "thumb"  # 临时文件夹的名字
 large_img_dir_name = "images"  # 大图文件夹的名字
@@ -54,12 +54,15 @@ start_page = 1  # 起始页面
 json_body = []  # 需要一起写入到文件的信息
 pics_limit = -1  # 限制获取的图片数量
 page_limit = -1  # 限制获取的页面数量
-bool_download_thumb = False  # 是否同时下载缩略图
-bool_download_large_img = False  # 是否同时下载大图
+download_thumb = False  # 是否同时下载缩略图
+download_large_img = False  # 是否同时下载大图
 start_time = 0  # 处理开始的时间
+cache_pages = 0  # 缓存中的页面数量
+cache_limit = 50  # 写入文件需要达到的缓存数量
+result = []  # 包含下一页的信息或者退出的信息
 
 # 连接数据库
-database = sqlite3.connect(":memory:")
+database = sqlite3.connect(":memory:")  # 储存在内存中
 cursor = database.cursor()
 cursor.executescript(
         r"""
@@ -75,6 +78,10 @@ cursor.executescript(
             width INTEGER);
         """)
 database.commit()
+
+with sqlite3.connect(database_file_name) as db:  # 初始化本地数据库文件
+    db.execute("DROP TABLE IF EXISTS konachan")
+    db.executescript("".join(database.iterdump()))
 
 
 def _make_soup(response):
@@ -131,7 +138,8 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
     if soup == -1: return  # 退出
     pic_body = soup.find("ul", id="post-list-posts")  # 图片存在的主体
     paginator = soup.find("div", id="paginator")  # 页面导航栏
-    current_page = paginator.div.find("em", class_="current").text  # 当前页面，数字
+    current_page = int(
+            paginator.div.find("em", class_="current").text)  # 当前页面，数字
     print(colored("当前页面: {}".format(current_page), "blue"))
 
     next_page_href = paginator.find("a", class_="next_page")  # 下一页的链接
@@ -146,6 +154,8 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
     for pic in pics:
         if pic is None: break
         if total_pic_count == pics_limit: break
+        if current_page == page_limit: break
+
         total_pic_count += 1
         information = OrderedDict()
 
@@ -183,23 +193,21 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         update_database(information)
 
         # 下载
-        if bool_download_thumb:
-            download_img(
-                    thumb_img_src, [pic_id, thumb_dir_name, tags], ".jpg",
-                    thumb=True)  # 下载缩略图
-        if bool_download_large_img:
-            download_img(direct_img_link, [pic_id, tags], ".jpg")  # 下载jpg大图
+        if download_thumb:  # 下载缩略图
+            download_img(thumb_img_src, [pic_id, thumb_dir_name, tags], ".jpg",
+                         thumb=True)
+        if download_large_img:  # 下载jpg大图
+            download_img(direct_img_link, [pic_id, tags], ".jpg")
 
         # 跳出条件检测
-        if total_pic_count == pics_limit or next_page == page_limit + 1:
-            return current_page, total_pic_count, perf_counter() - running_time
-    else:  # 没什么事情就继续爬下一页
-        if next_page_href is None:
-            return current_page, total_pic_count, perf_counter() - running_time
-        print(colored("\n下一页面: {}  {} s\n".format(
-                next_page, perf_counter() - start_time), "blue"))
-        return dump_info(get_data(next_page), pics_limit=pics_limit,
-                         page_limit=page_limit)
+        if total_pic_count == pics_limit:
+            return current_page - start_page + 1, total_pic_count, perf_counter() - running_time, -1
+    # 没什么事情就继续爬下一页
+    if next_page_href is None or next_page >= page_limit:
+        return current_page - start_page + 1, total_pic_count, perf_counter() - running_time, -1
+    print(colored("\n下一页面: {}  {} s\n".format(
+            next_page, perf_counter() - start_time), "blue"))
+    return next_page,
 
 
 def update_database(information_dict, cursor=cursor):
@@ -211,11 +219,15 @@ def update_database(information_dict, cursor=cursor):
             VALUES ({},{},{},{},{},{},{},{})
             """.format(
                     information_dict["id"],
-                    '"' + information_dict["tags"] + '"',
-                    '"' + information_dict["information_link"] + '"',
-                    '"' + information_dict["sample_img_URL"] + '"',
-                    '"' + information_dict["thumb_img_URL"] + '"',
-                    '"' + information_dict["resolution"] + '"',
+                    "'" + information_dict["tags"].replace("'", "''") + "'",
+                    "'" + information_dict["information_link"].replace("'",
+                                                                       "''") + "'",
+                    "'" + information_dict["sample_img_URL"].replace("'",
+                                                                     "''") + "'",
+                    "'" + information_dict["thumb_img_URL"].replace("'",
+                                                                    "''") + "'",
+                    "'" + information_dict["resolution"].replace("'",
+                                                                 "''") + "'",
                     information_dict["height"],
                     information_dict["width"]
             )
@@ -294,59 +306,76 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
             "green"))
 
 
+def dump_json(json_body):
+    """增量写入json文件"""
+    start_time = perf_counter()
+    with open(json_file_name, "a") as file:
+        json.dump(json_body, file, indent=True)  # 写入文件
+    print(colored(
+            "写入 {} 完成… {}s".format(json_file_name, perf_counter() - start_time),
+            "green"))
+
+
+def dump_database(database):
+    """增量写入数据库"""
+    start_time = perf_counter()
+    database.commit()
+
+    database_iter = database.iterdump()
+
+    with sqlite3.connect(database_file_name) as db:
+        for line in database_iter:
+            if line.startswith("INSERT"):
+                db.execute(line)
+    database.execute("DELETE FROM konachan")
+    print(colored("写入 {} 完成… {}s".format(database_file_name,
+                                         perf_counter() - start_time), "green"))
+
+
 if __name__ == "__main__":
     _pics_limit = input("设定图数\n>>>")
     _page_limit = input("设定页数\n>>>")
-    _download_thumb = input("是否同时下载缩略图？ [y/n (y)]\n>>>")
-    _download_large_img = input("是否同时下载jpg大图？ [y/n (y)]\n>>>")
 
     # 转换字符串到数字
     if _pics_limit: pics_limit = int(_pics_limit)
     if _page_limit: page_limit = int(_page_limit)
 
     # 处理要下载文件时的必要事件
-    if _download_thumb.lower() in ["y", "yes", "shi", "do", ""]:
-        bool_download_thumb = True
+    if download_thumb:
         if not os.path.exists(thumb_dir_name):
             os.mkdir(thumb_dir_name)
-    if _download_large_img.lower() in ["y", "yes", "shi", "do", ""]:
-        bool_download_large_img = True
+    if download_large_img:
         if not os.path.exists(large_img_dir_name):
             os.mkdir(large_img_dir_name)
 
-    running_time = perf_counter()  # 启动时间
-
-    # 启动爬虫
-    a, b, c = dump_info(get_data(start_page), pics_limit=pics_limit,
-                        page_limit=page_limit)
-    print(colored("已经获取{}页数据 {}张图片，完成\n--- {} seconds ---".format(
-            a, b, c), "magenta"))
-
     # 判断要写入的文件是否存在
-    write_mode = "a"
-    if os.path.exists(data_file_name):
+    if os.path.exists(json_file_name):
         bool_override = input(
-                colored("文件 {} 已存在，是否覆盖？ [y/n (y)]\n>>>".format(data_file_name),
+                colored("文件 {} 已存在，是否覆盖？ [y/n (y)]\n>>>".format(json_file_name),
                         "yellow"))
         if bool_override.lower() in ["y", "yes", "shi", "do", ""]:
-            write_mode = "w"
+            os.remove(json_file_name)
 
-    # 保存信息到json
-    start_time = perf_counter()
-    with open(data_file_name, write_mode) as file:
-        json.dump(json_body, file, indent=True)  # 写入文件
+    # 启动爬虫
+    running_time = perf_counter()  # 启动时间
+    times = 1  # 统计倍率
 
-    print(colored(
-            "写入 {} 完成… {}s".format(data_file_name, perf_counter() - start_time),
-            "green"))
+    while start_page >= 0:
+        result = dump_info(get_data(start_page), pics_limit=pics_limit,
+                           page_limit=page_limit)
+        start_page = result[-1]
+        # 达到缓存数量后 写入本地文件
+        if total_pic_count >= cache_limit * times or start_page < 0:
+            # 保存信息到json
+            dump_json(json_body)
+            json_body = []
 
-    # 保存信息到sqlite3
-    start_time = perf_counter()
-    database.commit()
-    with sqlite3.connect(database_file_name) as db:
-        db.execute("DROP TABLE IF EXISTS konachan")
-        db.executescript("".join(database.iterdump()))
-    print(colored("写入 {} 完成… {}s".format(database_file_name,
-                                         perf_counter() - start_time), "green"))
+            # 保存信息到sqlite3
+            dump_database(database)
+            times += 1
 
+    print(colored("已经获取{}页数据 {}张图片，完成\n--- {} seconds ---".format(
+            *result[:-1]), "magenta"))
+
+    database.close()
 os.system("pause")

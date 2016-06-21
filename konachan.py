@@ -34,7 +34,7 @@ session.headers.update({
     "Cache-Control": "no-cache",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "User-Agent": "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36",
-    "Accept-Encoding": "gzip, deflate, sdch",})
+    "Accept-Encoding": "gzip, deflate, sdch"})
 # 代理设置
 session.proxies.update({"http": "http://localhost:8087"})  # 本地代理，使用GAE:8087
 
@@ -59,7 +59,7 @@ bool_download_large_img = False  # 是否同时下载大图
 database = sqlite3.connect(":memory:")
 cursor = database.cursor()
 cursor.executescript(
-        """
+        r"""
         DROP TABLE IF EXISTS konachan;
         CREATE TABLE konachan(
             id INTEGER NOT NULL PRIMARY KEY UNIQUE,
@@ -69,7 +69,7 @@ cursor.executescript(
             thumb_img_URL TEXT,
             resolution TEXT,
             height INTEGER,
-            width INTEGER)
+            width INTEGER);
         """)
 database.commit()
 

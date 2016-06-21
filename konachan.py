@@ -10,6 +10,7 @@ Author: enihsyou
 import json
 import os
 import re
+import sqlite3
 from collections import OrderedDict
 
 import bs4
@@ -21,7 +22,8 @@ session = requests.Session()
 
 # 字段定义
 base_url = "http://konachan.com"
-data_file_name = "konachan.json"  # 需要保存的文件名
+data_file_name = "konachan.json"  # 保存的json文件名
+database_file_name = "konachan.sqlite3"  # 保存的sqlite3文件名
 thumb_dir_name = "thumb"  # 临时文件夹的名字
 large_img_dir_name = "images"  # 大图文件夹的名字
 
@@ -31,10 +33,8 @@ session.headers.update({
     "Pragma": "no-cache",
     "Cache-Control": "no-cache",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Upgrade-Insecure-Requests": "1",
     "User-Agent": "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36",
-    "Accept-Encoding": "gzip, deflate, sdch",
-    "Accept-Language": "zh-CN,zh;q=0.8,ja;q=0.6,en;q=0.4,zh-TW;q=0.2"})
+    "Accept-Encoding": "gzip, deflate, sdch",})
 # 代理设置
 session.proxies.update({"http": "http://localhost:8087"})  # 本地代理，使用GAE:8087
 
@@ -54,6 +54,24 @@ pics_limit = -1  # 限制获取的图片数量
 page_limit = -1  # 限制获取的页面数量
 bool_download_thumb = False  # 是否同时下载缩略图
 bool_download_large_img = False  # 是否同时下载大图
+
+# 连接数据库
+database = sqlite3.connect(":memory:")
+cursor = database.cursor()
+cursor.executescript(
+        """
+        DROP TABLE IF EXISTS konachan;
+        CREATE TABLE konachan(
+            id INTEGER NOT NULL PRIMARY KEY UNIQUE,
+            tags TEXT,
+            information_link TEXT,
+            sample_img_URL TEXT,
+            thumb_img_URL TEXT,
+            resolution TEXT,
+            height INTEGER,
+            width INTEGER)
+        """)
+database.commit()
 
 
 def _make_soup(response):
@@ -124,44 +142,75 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
         total_pic_count += 1
         information = OrderedDict()
 
+        # 提取信息
         thumb = pic.find("a", class_="thumb")  # type: bs4.Tag 图片的缩略图链接
         pic_page = cut_base_url(thumb["href"])  # 图片的详细页面链接
         thumb_img = thumb.img  # type: bs4.Tag 图片的缩略图tag
         thumb_img_src = cut_base_url(thumb_img["src"])  # 图片的缩略图的URL
         thumb_img_title = thumb_img["title"]  # 图片的tag标题
-        tag = RE_TITLE_TAG.search(thumb_img_title).group(1)  # 取出tag
+        tags = RE_TITLE_TAG.search(thumb_img_title).group(1)  # 取出tag
         pic_id = RE_PIC_ID.search(pic_page).group(1)  # 图片在站点上的id
-        direct_link = cut_base_url(
+        direct_img_link = cut_base_url(
                 pic.find("a", class_="directlink")["href"])  # 默认大图的链接
         direct_link_resolution = pic.find(
                 "span", class_="directlink-res").text  # 图片实际分辨率
 
         # 注册信息
         information["index"] = total_pic_count
-        information["id"] = pic_id
-        information["详细页面"] = base_url + pic_page
-        information["缩略图URL"] = thumb_img_src
-        information["Tags"] = tag
-        information["大图URL"] = direct_link
-        information["分辨率"] = direct_link_resolution
-        print(information)
+        information["id"] = int(pic_id)
+        information["tags"] = tags
+        information["information_link"] = base_url + pic_page
+        information["sample_img_URL"] = direct_img_link
+        information["thumb_img_URL"] = thumb_img_src
+        information["resolution"] = direct_link_resolution
+        information["height"] = int(direct_link_resolution.split(" x ")[0])
+        information["width"] = int(direct_link_resolution.split(" x ")[1])
 
+        # 打印当前信息
+        print(information["id"], information["information_link"])
+
+        # json信息添加
         json_body.append(information)
+
+        # 数据库信息添加
+        update_database(information)
+
+        # 下载
         if bool_download_thumb:
             download_img(
-                    thumb_img_src, [pic_id, thumb_dir_name, tag], ".jpg",
+                    thumb_img_src, [pic_id, thumb_dir_name, tags], ".jpg",
                     thumb=True)  # 下载缩略图
         if bool_download_large_img:
-            download_img(direct_link, [pic_id, tag], ".jpg")  # 下载jpg大图
+            download_img(direct_img_link, [pic_id, tags], ".jpg")  # 下载jpg大图
 
-    if total_pic_count == pics_limit or next_page == page_limit + 1:  # 达到跳出条件
-        print(colored("已经获取{}页数据 {}张图片，完成 跳出".format(
-                current_page, total_pic_count), "magenta"))
-        return
+        if total_pic_count == pics_limit or next_page == page_limit + 1:  # 达到跳出条件
+            print(colored("已经获取{}页数据 {}张图片，完成 跳出".format(
+                    current_page, total_pic_count), "magenta"))
+            return
     else:  # 没什么事情就继续爬下一页
         print(colored("\n下一页面: {}\n".format(next_page), "blue"))
         dump_info(get_data(next_page), pics_limit=pics_limit,
                   page_limit=page_limit)
+
+
+def update_database(information_dict, cursor=cursor):
+    """写入信息到内存数据库"""
+    cursor.execute(
+            r"""
+            INSERT INTO konachan (
+            id, tags, information_link, sample_img_URL, thumb_img_URL, resolution, height, width)
+            VALUES ({},{},{},{},{},{},{},{})
+            """.format(
+                    information_dict["id"],
+                    '"' + information_dict["tags"] + '"',
+                    '"' + information_dict["information_link"] + '"',
+                    '"' + information_dict["sample_img_URL"] + '"',
+                    '"' + information_dict["thumb_img_URL"] + '"',
+                    '"' + information_dict["resolution"] + '"',
+                    information_dict["height"],
+                    information_dict["width"],
+            )
+    )
 
 
 def cut_base_url(url):
@@ -179,7 +228,7 @@ def cut_base_url(url):
         return url
 
 
-def size_format(_bytes, suffix="B"):
+def format_size(_bytes, suffix="B"):
     """将byte字节数转换成适合人类阅读的文本
 
     References:
@@ -228,7 +277,7 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
         print(colored("同名文件已存在，覆盖", "yellow"))
     with open(file_path, "wb") as _file:
         bytes_write = _file.write(data)
-    file_size = size_format(bytes_write)
+    file_size = format_size(bytes_write)
     print(colored(
             "下载成功(大小: {}): {}".format(file_size, file_name), "green"))
 
@@ -236,8 +285,8 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
 if __name__ == "__main__":
     _pics_limit = input("设定图数\n>>>")
     _page_limit = input("设定页数\n>>>")
-    _download_thumb = input("是否同时下载缩略图[y/n]\n>>>")
-    _download_large_img = input("是否同时下载jpg大图[y/n]\n>>>")
+    _download_thumb = input("是否同时下载缩略图？ [y/n (y)]\n>>>")
+    _download_large_img = input("是否同时下载jpg大图？ [y/n (y)]\n>>>")
 
     # 转换字符串到数字
     if _pics_limit: pics_limit = int(_pics_limit)
@@ -260,14 +309,21 @@ if __name__ == "__main__":
     write_mode = "a"
     if os.path.exists(data_file_name):
         bool_override = input(
-                colored("文件 {} 已存在，是否覆盖？[y/n]\n>>>".format(data_file_name),
+                colored("文件 {} 已存在，是否覆盖？ [y/n (y)]\n>>>".format(data_file_name),
                         "yellow"))
         if bool_override.lower() in ["y", "yes", "shi", "do", ""]:
             write_mode = "w"
 
-    # 保存信息到文件
+    # 保存信息到json
     with open(data_file_name, write_mode) as file:
         json.dump(json_body, file, indent=True, ensure_ascii=False)  # 写入文件
 
-    print(colored("\n写入 {} 完成…".format(data_file_name), "green"))
-    os.system("pause")
+    print(colored("写入 {} 完成…".format(data_file_name), "green"))
+
+    # 保存信息到sqlite3
+    database.commit()
+    with sqlite3.connect(database_file_name) as db:
+        db.executescript("".join(database.iterdump()))
+    print(colored("写入 {} 完成…".format(database_file_name), "green"))
+
+os.system("pause")

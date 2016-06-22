@@ -4,29 +4,50 @@ File name: konachan
 Reference:
 Introduction: 下载konachan.com上面的图片的小爬虫
 Date: 2016-06-04
-Last modified: 2016-06-07
+Last modified: 2016-06-21
 Author: enihsyou
 """
 import json
+import multiprocessing as mp
 import os
 import re
 import sqlite3
+import threading
 from collections import OrderedDict
-from time import perf_counter
+from queue import Queue
+from time import perf_counter, sleep
 
 import bs4
 import requests
 from bs4 import BeautifulSoup
 from termcolor import colored
 
-session = requests.Session()
-
-# 字段定义
+# 参数定义
 base_url = "http://konachan.com"
 json_file_name = "konachan.json"  # 保存的json文件名
 database_file_name = "konachan.sqlite3"  # 保存的sqlite3文件名
 thumb_dir_name = "thumb"  # 临时文件夹的名字
 large_img_dir_name = "images"  # 大图文件夹的名字
+start_page = 1  # 起始页面
+pics_limit = -1  # 限制获取的图片数量 (-1=无限)
+page_limit = -1  # 限制获取的页面数量 (-1=无限)
+DOWNLOAD_THUMB = True  # 是否同时下载缩略图
+DOWNLOAD_LARGE_IMG = False  # 是否同时下载大图
+DUPLICATE_OVERWRITE = False  # 遇到同名文件是否覆盖
+THREAD_HANG_TIME = 0.5  # 线程获取数据的等待时间
+cache_limit = 200  # 写入文件需要达到的缓存数量
+
+# 字段定义
+session = requests.Session()
+work_queue = Queue()  # 下载队列
+QUEUE_LOCK = threading.Lock()
+exit_flag = False  # 程序退出的标志
+working_threads = []  # 工作线程
+total_pic_count = 0  # 总共获取了多少图片的信息
+json_body = []  # 需要一起写入到文件的信息
+START_TIME = 0  # 处理开始的时间
+cache_pages = 0  # 缓存中的页面数量
+result = []  # 包含下一页的信息或者退出的信息
 
 # 发送的HEADER
 session.headers.update({
@@ -42,31 +63,17 @@ session.proxies.update({"http": "http://localhost:8087"})  # 本地代理，使�
 # 正则表达式搜索定义
 RE_TITLE_TAG = re.compile(r"Tags: (.+) User")  # 抓取出tag内容
 RE_PAGE_NUMBER = re.compile(r"page=(\d+)")  # 抓取出page，当前页数
-RE_PIC_ID = re.compile(r"/(\d+?)/")  # 抓取出图片id
+RE_PIC_ID = re.compile(r"\b(\d+)\b")  # 抓取出图片id
 RE_PICS_CLASS = re.compile(r"creator-id-\d*")  # 图片的所在位置的class
 RE_BASE_URL = re.compile("^" + base_url)  # 用于去除http://hostname.xxx开头
 RE_HOST_NAME = re.compile(r"(?<=http://)?([^/]+?)\..+/?")  # 捕获次级域名
 RE_VALID_PATH = re.compile(r"[:<>\"/\\\|\?\*]")
 
-# 参数定义
-total_pic_count = 0  # 总共获取了多少图片的信息
-start_page = 1  # 起始页面
-json_body = []  # 需要一起写入到文件的信息
-pics_limit = -1  # 限制获取的图片数量
-page_limit = -1  # 限制获取的页面数量
-download_thumb = False  # 是否同时下载缩略图
-download_large_img = False  # 是否同时下载大图
-start_time = 0  # 处理开始的时间
-cache_pages = 0  # 缓存中的页面数量
-cache_limit = 200  # 写入文件需要达到的缓存数量
-result = []  # 包含下一页的信息或者退出的信息
-
 # 连接数据库
 database = sqlite3.connect(":memory:")  # 储存在内存中
 cursor = database.cursor()
-cursor.executescript(
+cursor.execute(
         r"""
-        DROP TABLE IF EXISTS konachan;
         CREATE TABLE konachan(
             id INTEGER NOT NULL PRIMARY KEY UNIQUE,
             tags TEXT,
@@ -110,10 +117,10 @@ def get_data(page):
     Raises:
         Exception (ERROR): 连接出问题
     """
-    global start_time
+    global START_TIME
     if page == -1: return -1  # 退出
     try:
-        start_time = perf_counter()  # 处理开始的时间
+        START_TIME = perf_counter()  # 处理开始的时间
         response = session.get(base_url + "/post", params={"page": page})
         response.raise_for_status()
     except Exception as ERROR:
@@ -153,8 +160,8 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
 
     for pic in pics:
         if pic is None: break
-        if total_pic_count == pics_limit: break
-        if current_page == page_limit: break
+        if total_pic_count == pics_limit: break  # 达到图片总数限制
+        if current_page == page_limit + 1: break  # 达到页面数量限制
 
         total_pic_count += 1
         information = OrderedDict()
@@ -195,20 +202,23 @@ def dump_info(soup, pics_limit=-1, page_limit=-1):
             pass
 
         # 下载
-        if download_thumb:  # 下载缩略图
-            download_img(thumb_img_src, [pic_id, thumb_dir_name, tags], ".jpg",
-                         thumb=True)
-        if download_large_img:  # 下载jpg大图
-            download_img(direct_img_link, [pic_id, tags], ".jpg")
+        if DOWNLOAD_THUMB:  # 下载缩略图
+            work_queue.put({"target": download_img,
+                            "args": (thumb_img_src,
+                                     [pic_id, thumb_dir_name, tags], ".jpg",
+                                     True)})
+        if DOWNLOAD_LARGE_IMG:  # 下载jpg大图
+            work_queue.put({"target": download_img,
+                            "args": (direct_img_link, [pic_id, tags], ".jpg")})
 
         # 跳出条件检测
         if total_pic_count == pics_limit:
-            return current_page - start_page + 1, total_pic_count, perf_counter() - running_time, -1
+            return current_page - start_page + 1, total_pic_count, -1
     # 没什么事情就继续爬下一页
     if next_page_href is None or next_page == page_limit + 1:
-        return current_page - start_page + 1, total_pic_count, perf_counter() - running_time, -1
+        return current_page - start_page + 1, total_pic_count, -1
     print(colored("\n下一页面: {}  {} s\n".format(
-            next_page, perf_counter() - start_time), "blue"))
+            next_page, perf_counter() - START_TIME), "blue"))
     return next_page,
 
 
@@ -285,6 +295,8 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
     try:
         start_time = perf_counter()
         data = session.get(base_url + url).content
+    except requests.Timeout as ERROR:
+        raise ERROR
     except Exception as ERROR:
         print(colored(ERROR, "red"))
         raise ERROR
@@ -298,7 +310,11 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
         file_path = os.path.join("./" + large_img_dir_name, file_name)
 
     if os.path.exists(file_path):  # 处理同名文件
-        print(colored("同名文件已存在，覆盖", "yellow"))
+        print(colored(
+                "同名文件已存在 id: {}".format(RE_PIC_ID.search(file_name).group(1)),
+                "yellow"))
+        if not DUPLICATE_OVERWRITE:
+            return
     with open(file_path, "wb") as _file:
         bytes_write = _file.write(data)
     file_size = format_size(bytes_write)
@@ -306,6 +322,7 @@ def download_img(url, file_name, suffix=".jpg", thumb=False):
             "下载成功(大小: {} {}s): {}".format(
                     file_size, perf_counter() - start_time, file_name),
             "green"))
+    # work_queue.task_done()
 
 
 def dump_json(json_body):
@@ -334,7 +351,33 @@ def dump_database(database):
                                          perf_counter() - start_time), "green"))
 
 
+class DownloadThread(threading.Thread):
+    """下载器线程"""
+
+    def __init__(self):
+        super().__init__()
+
+    def run(self):
+        while not exit_flag:
+            # QUEUE_LOCK.acquire()
+            if not work_queue.empty():
+                work = work_queue.get()  # 取得一个任务
+                # QUEUE_LOCK.release()
+                try:
+                    work["target"](*work["args"])  # 进行下载
+                    # print(self)
+                    work_queue.task_done()
+                except requests.Timeout:
+                    work_queue.put(work)  # 失败则重新放回队列
+                except Exception as ERROR:
+                    raise ERROR
+            # else:
+            #     QUEUE_LOCK.release()
+            sleep(THREAD_HANG_TIME)
+
+
 if __name__ == "__main__":
+    # 用户信息输入
     _pics_limit = input("设定图数\n>>>")
     _page_limit = input("设定页数\n>>>")
 
@@ -343,10 +386,10 @@ if __name__ == "__main__":
     if _page_limit: page_limit = int(_page_limit)
 
     # 处理要下载文件时的必要事件
-    if download_thumb:
+    if DOWNLOAD_THUMB:
         if not os.path.exists(thumb_dir_name):
             os.mkdir(thumb_dir_name)
-    if download_large_img:
+    if DOWNLOAD_LARGE_IMG:
         if not os.path.exists(large_img_dir_name):
             os.mkdir(large_img_dir_name)
 
@@ -358,26 +401,38 @@ if __name__ == "__main__":
         if bool_override.lower() in ["y", "yes", "shi", "do", ""]:
             os.remove(json_file_name)
 
+    # 启动下载器线程
+    for _ in range(mp.cpu_count()):
+        thread = DownloadThread()
+        thread.start()
+        working_threads.append(thread)  # 添加到工作中的线程队列
+    print(working_threads)
     # 启动爬虫
     running_time = perf_counter()  # 启动时间
     times = 1  # 统计倍率
+    working_page = start_page
 
-    while start_page >= 0:
-        result = dump_info(get_data(start_page), pics_limit=pics_limit,
+    while working_page >= 0:
+        result = dump_info(get_data(working_page), pics_limit=pics_limit,
                            page_limit=page_limit)
-        start_page = result[-1]
+        working_page = result[-1]
         # 达到缓存数量后 写入本地文件
-        if total_pic_count >= cache_limit * times or start_page < 0:
+        if total_pic_count >= cache_limit * times or working_page < 0:
             # 保存信息到json
             dump_json(json_body)
             json_body = []
 
             # 保存信息到sqlite3
             dump_database(database)
+
             times += 1
 
-    print(colored("已经获取{}页数据 {}张图片，完成\n--- {} seconds ---".format(
-            *result[:-1]), "magenta"))
-
+    # 退出准备
     database.close()
-os.system("pause")
+    work_queue.join()
+    exit_flag = 1
+    for t in working_threads:
+        t.join()
+    print(colored("已经获取{}页数据 {}张图片，完成\n--- {} seconds ---".format(
+            *result[:-1], perf_counter() - START_TIME), "magenta"))
+    # os.system("pause")

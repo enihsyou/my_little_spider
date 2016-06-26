@@ -63,9 +63,8 @@ session = requests.Session()
 download_queue = Queue()  # 下载队列
 update_queue = Queue()  # 等待更新写入队列
 page_queue = Queue(THREAD_LIMIT)  # 页面获取队列
-QUEUE_LOCK = Lock()
+UPDATE_QUEUE_LOCK = Lock()  # 更新数据用的锁
 EXIT_FLAG = False  # 程序退出的标志
-PAGE_EXCEEDED = False  # 达到最后一面
 working_downloader_threads = []  # 工作中的下载器线程
 working_page_threads = []  # 工作中的页面获取进程
 total_pic_count = 0  # 总共获取了多少图片的信息
@@ -136,7 +135,9 @@ def exit_handler():
 
     try:
         # 等待队列清空
-        page_queue.join()
+        for t in working_page_threads:
+            t.join()
+
         update_queue.join()
         download_queue.join()
 
@@ -144,13 +145,11 @@ def exit_handler():
         EXIT_FLAG = True
 
         # 终止线程
-        for t in working_page_threads:
-            t.join()
         update_thread.join()
         for t in working_downloader_threads:
             t.join()
     finally:
-        print(colored("已经获取{}页数据 {}张图片，完成\n--- {} seconds ---".format(
+        print(colored("已经获取{}页数据 {}张图片，完成\n--- {:.4f} seconds ---".format(
                 last_page - start_page + 1, total_pic_count, perf_counter() - START_TIME), "magenta"))
         exit()
 
@@ -182,112 +181,6 @@ def extract_info(li):
     pic.add(width=int(width), height=int(height), index=total_pic_count)
 
     return pic
-
-
-# def dump_info(soup, pics_limit=-1, page_limit=-1):
-#     """获取信息，添加到一个列表中，等待序列化成json
-#
-#     Args:
-#         soup (bs4.BeautifulSoup): 连接汤
-#         pics_limit (int): 限制获取图片的数量 (default: -1)
-#         page_limit (int): 限制获取页面的数量 (default: -1)
-#
-#     Returns:
-#         None: 跳出
-#     """
-#     global total_pic_count, cache_pages
-#     if soup == -1: return  # 退出
-#     connect_time = perf_counter() - get_time
-#     pic_body = soup.find("ul", id="post-list-posts")  # 图片存在的主体
-#     paginator = soup.find("div", id="paginator")  # 页面导航栏
-#     current_page = int(
-#             paginator.div.find("em", class_="current").text)  # 当前页面，数字
-#     print(colored("当前页面: {}".format(current_page), "blue"))
-#
-#     next_page_href = paginator.find("a", class_="next_page")  # 下一页的链接
-#
-#     if next_page_href is not None:  # 未抵达最后一页
-#         next_page = int(RE_PAGE_NUMBER.search(next_page_href["href"]).group(1))
-#     else:
-#         next_page = -1
-#
-#     pics = pic_body.find_all("li", class_=RE_PICS_CLASS)  # 所有图片列表
-#
-#     for pic in pics:
-#         if pic is None: break
-#         if total_pic_count == pics_limit: break  # 达到图片总数限制
-#         if current_page == page_limit + 1: break  # 达到页面数量限制
-#
-#         total_pic_count += 1
-#         information = OrderedDict()
-#
-#         # 提取信息
-#         thumb = pic.find("a", class_="thumb")  # type: bs4.Tag 图片的缩略图链接
-#         pic_page = cut_base_url(thumb["href"])  # 图片的详细页面链接
-#         thumb_img = thumb.img  # type: bs4.Tag 图片的缩略图tag
-#         thumb_img_src = cut_base_url(thumb_img["src"])  # 图片的缩略图的URL
-#         thumb_img_title = thumb_img["title"]  # 图片的tag标题
-#         tags = RE_TITLE_TAG.search(thumb_img_title).group(1)  # 取出tag
-#         pic_id = RE_PIC_ID.search(pic_page).group(1)  # 图片在站点上的id
-#         direct_img_link = cut_base_url(
-#                 pic.find("a", class_="directlink")["href"])  # 默认大图的链接
-#         direct_link_resolution = pic.find(
-#                 "span", class_="directlink-res").text  # 图片实际分辨率
-#
-#         # 注册信息
-#         information["index"] = total_pic_count
-#         information["id"] = int(pic_id)
-#         information["tags"] = tags
-#         information["information_link"] = base_url + pic_page
-#         information["sample_img_URL"] = direct_img_link
-#         information["thumb_img_URL"] = thumb_img_src
-#         information["resolution"] = direct_link_resolution
-#         information["width"] = int(direct_link_resolution.split(" x ")[0])
-#         information["height"] = int(direct_link_resolution.split(" x ")[1])
-#
-#         # 数据库信息添加
-#         update_database(information)
-#         # json信息添加
-#         json_body.append(information)
-#
-#         # 打印当前信息
-#         print(information["id"], information["information_link"])
-#         cache_pages += 1
-#
-#         # 下载
-#         if DOWNLOAD_THUMB:  # 下载缩略图
-#             work_queue.put({"target": download_img,
-#                             "args": (thumb_img_src,
-#                                      [pic_id, thumb_dir_name, tags], ".jpg",
-#                                      True)})
-#         if DOWNLOAD_LARGE_IMG:  # 下载jpg大图
-#             work_queue.put({"target": download_img,
-#                             "args": (direct_img_link, [pic_id, tags], ".jpg")})
-#
-#         # 跳出条件检测
-#         if total_pic_count == pics_limit:
-#             print(colored("\n连接时间: {}s 处理时间: {}s"
-#                           "本页获取: {} 缓存: {}/{} 已获取:{} {} s"
-#                           "\n".format(connect_time,
-#                                       perf_counter() - get_time - connect_time,
-#                                       len(pics), cache_pages, cache_limit,
-#                                       total_pic_count,
-#                                       perf_counter() - get_time),
-#                           "blue"))
-#             return current_page - start_page + 1, total_pic_count, -1
-#     # 没什么事情就继续爬下一页
-#     if next_page_href is None or next_page == page_limit + 1:
-#         return current_page - start_page + 1, total_pic_count, -1
-#
-#     print(colored("\n连接时间: {}s 处理时间: {}s"
-#                   "\n下一页面: {} 本页获取: {} "
-#                   "缓存: {}/{} 已获取:{} {} s"
-#                   "\n".format(connect_time,
-#                               perf_counter() - get_time - connect_time,
-#                               next_page, len(pics), cache_pages, cache_limit,
-#                               total_pic_count, perf_counter() - get_time),
-#                   "blue"))
-#     # return next_page,
 
 
 def cut_base_url(url):
@@ -364,7 +257,7 @@ def download_img(url, file_name, suffix=".jpg", thumb=False, thread=""):
         bytes_write = _file.write(data)
     file_size = format_size(bytes_write)
     print(colored(
-            "下载成功({} 大小: {} {:.3f}s): {}".format(
+            "下载成功({} 大小: {} {:.4f}s): {}".format(
                     thread, file_size, perf_counter() - start_time, file_name),
             "green"))
 
@@ -453,32 +346,21 @@ class PageThread(Thread):
 
     def run(self):
         """线程执行"""
-        global PAGE_EXCEEDED
 
         # 程序没有退出而且没有达到最后一面
-        while not EXIT_FLAG and not PAGE_EXCEEDED:
-            if not page_queue.empty():
-                work = page_queue.get()
-                self.init(work)
+        while not EXIT_FLAG:
+            working_page = page_queue.get()
+            page_queue.put(working_page + 1)
+            self.init(working_page)
 
-                # 处理到达最后一面的情况 或者 特殊意外
-                if self.html is not None:
-                    self.pic_list = self.html.find_all("li")  # 所有图片列表
-                    self.parser(self.pic_list)
-                    try:
-                        page_queue.task_done()
-                    except ValueError:
-                        pass
-                else:
-                    PAGE_EXCEEDED = True  # 标记达到最后一面
-                    # 清空队列
-                    with page_queue.mutex:
-                        page_queue.queue.clear()
-                        page_queue.unfinished_tasks = 0
-                    return
-
+            # 处理到达最后一面的情况 或者 特殊意外
+            if self.html is not None:
+                if working_page == -1: return
+                self.pic_list = self.html.find_all("li")  # 所有图片列表
+                self.parser(self.pic_list)
+                if working_page == page_limit: return
             else:
-                sleep(THREAD_WAITING_TIME)
+                return
 
     def init(self, working_page):
         """初始化，主要判断是否有可获取的内容"""
@@ -491,7 +373,7 @@ class PageThread(Thread):
         global total_pic_count, cache_pages, last_page
         print(colored("{} 当前页面: {}".format(self.getName(), self.working_page), "blue"))
         start_time = perf_counter()
-        last_page = self.working_page
+        last_page = max(self.working_page, last_page)
 
         for pic in pics_list:
             if pic is None: break
@@ -504,7 +386,7 @@ class PageThread(Thread):
             pic_info = extract_info(pic)
 
             # 添加到待更新队列
-            with QUEUE_LOCK:
+            with UPDATE_QUEUE_LOCK:
                 update_queue.put(pic_info.information)
 
             # 打印当前信息
@@ -524,7 +406,7 @@ class PageThread(Thread):
             if total_pic_count == pics_limit:
                 break
         self.parser_time = perf_counter() - start_time
-        print(colored("连接时间: {}s 处理时间: {}s 本页获取: {} 缓存: {}/{} 已获取:{} 总共: {}s\n".format(
+        print(colored("连接时间: {:.4f}s 处理时间: {:.4f}s 本页获取: {} 缓存: {}/{} 已获取:{} 启动: {:.4f}s\n".format(
                 self.connect_time, self.parser_time, len(pics_list), cache_pages, cache_limit, total_pic_count,
                 perf_counter() - START_TIME), "blue"))
 
@@ -555,7 +437,7 @@ class UpdateThread(Thread):
                 self.update_json(work)
                 self.update_database(work)
                 if cache_pages >= cache_limit:
-                    with QUEUE_LOCK:  # 锁定队列
+                    with UPDATE_QUEUE_LOCK:  # 锁定队列
                         # 保存信息到json
                         self.dump_json()
                         self.json_body = []
@@ -597,26 +479,29 @@ class UpdateThread(Thread):
 
     def update_database(self, information_dict):
         """写入信息到内存数据库"""
-        self.database.execute(
-                r"""
-                INSERT INTO konachan (
-                id, tags, information_link, sample_img_URL, thumb_img_URL, resolution, height, width)
-                VALUES ({},{},{},{},{},{},{},{})
-                """.format(
-                        information_dict["id"],
-                        "'" + information_dict["tags"].replace("'", "''") + "'",
-                        "'" + information_dict["information_link"].replace("'",
-                                                                           "''") + "'",
-                        "'" + information_dict["sample_img_URL"].replace("'",
+        try:
+            self.database.execute(
+                    r"""
+                    INSERT INTO konachan (
+                    id, tags, information_link, sample_img_URL, thumb_img_URL, resolution, height, width)
+                    VALUES ({},{},{},{},{},{},{},{})
+                    """.format(
+                            information_dict["id"],
+                            "'" + information_dict["tags"].replace("'", "''") + "'",
+                            "'" + information_dict["information_link"].replace("'",
+                                                                               "''") + "'",
+                            "'" + information_dict["sample_img_URL"].replace("'",
+                                                                             "''") + "'",
+                            "'" + information_dict["thumb_img_URL"].replace("'",
+                                                                            "''") + "'",
+                            "'" + information_dict["resolution"].replace("'",
                                                                          "''") + "'",
-                        "'" + information_dict["thumb_img_URL"].replace("'",
-                                                                        "''") + "'",
-                        "'" + information_dict["resolution"].replace("'",
-                                                                     "''") + "'",
-                        information_dict["width"],
-                        information_dict["height"]
-                )
-        )
+                            information_dict["width"],
+                            information_dict["height"]
+                    )
+            )
+        except sqlite3.IntegrityError:
+            print(information_dict["id"])
 
     def dump_json(self):
         """增量写入json文件"""
@@ -624,7 +509,6 @@ class UpdateThread(Thread):
         with open(json_file_name, "rb+") as file:
             json_data = json.dumps(self.json_body, indent=True, ensure_ascii=False)  # 写入文件
             json_data = json_data[1:]
-
             file.seek(-3, 2)
             start = file.read(1)
             if start == b"[":
@@ -632,9 +516,9 @@ class UpdateThread(Thread):
             else:
                 file.write(("," + json_data).encode())
         print(colored(
-                "写入 {} 完成… {} {}s".format(json_file_name, format_size(
+                "写入 {} 完成… {} {:.4f}s".format(json_file_name, format_size(
                         os.path.getsize(json_file_name)),
-                                          perf_counter() - start_time),
+                                              perf_counter() - start_time),
                 "green"))
 
     def dump_database(self):
@@ -652,7 +536,7 @@ class UpdateThread(Thread):
                     except sqlite3.IntegrityError:  # 可能由于服务器更新了新的图片
                         pass
         self.database.execute("DELETE FROM konachan")
-        print(colored("写入 {} 完成… {} {}s".format(database_file_name, format_size(
+        print(colored("写入 {} 完成… {} {:.4f}s".format(database_file_name, format_size(
                 os.path.getsize(database_file_name)), perf_counter() - start_time),
                       "green"))
 
@@ -667,6 +551,10 @@ class UpdateThread(Thread):
 
 
 if __name__ == "__main__":
+    # 更改代码页
+    os.system("chcp 65001")
+    os.system("cls")
+
     # 信息载入
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE) as f:
@@ -681,7 +569,6 @@ if __name__ == "__main__":
             f.write(
                     json.dumps(DEFAULT_PARAMETER, ensure_ascii=False,
                                indent=True))
-
     # 创建下载文件夹
     if DOWNLOAD_THUMB:
         if not os.path.exists(thumb_dir_name):
@@ -689,7 +576,7 @@ if __name__ == "__main__":
     if DOWNLOAD_LARGE_IMG:
         if not os.path.exists(large_img_dir_name):
             os.mkdir(large_img_dir_name)
-
+    start_page = 8200
     # 判断要写入的文件是否存在，并创建
     make_json(json_file_name)
 
@@ -705,19 +592,12 @@ if __name__ == "__main__":
 
     # 启动爬虫线程
     START_TIME = perf_counter()  # 爬虫启动时间
+    page_queue.put(start_page)
     for _ in range(THREAD_LIMIT):
         thread = PageThread()
         thread.start()
         working_page_threads.append(thread)
 
-    # 添加页面队列
-    working_page = start_page
-    while (page_limit < 0 or working_page - start_page <= page_limit) and not PAGE_EXCEEDED:
-        if page_queue.full():
-            sleep(THREAD_WAITING_TIME)
-            continue
-        page_queue.put(working_page)
-        working_page += 1
-
     # 退出准备
     exit_handler()
+    os.system("pause")

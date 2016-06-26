@@ -576,7 +576,6 @@ if __name__ == "__main__":
     if DOWNLOAD_LARGE_IMG:
         if not os.path.exists(large_img_dir_name):
             os.mkdir(large_img_dir_name)
-    start_page = 8200
     # 判断要写入的文件是否存在，并创建
     make_json(json_file_name)
 

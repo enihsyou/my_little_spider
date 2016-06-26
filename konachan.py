@@ -35,7 +35,7 @@ THREAD_WAITING_TIME = 0.5  # 线程获取数据的等待时间
 PROXY = "http://localhost:8087"  # 本地HTTP代理，使用GAE:8087
 DUPLICATE_OVERWRITE = True  # 遇到同名文件是否覆盖
 DATA_DROP = True  # 是否默认清除先前的数据 (default: True)
-cache_limit = 200  # 写入文件需要达到的缓存数量
+cache_limit = 1000  # 写入文件需要达到的缓存数量
 THREAD_LIMIT = os.cpu_count()  # 运行中的线程数量限制
 
 CONFIG_FILE = json_file_name.replace(".json", "_config.json")  # 配置文件
@@ -73,7 +73,6 @@ START_TIME = 0  # 处理开始的时间
 get_time = 0  # 获取页面的起始时间
 cache_pages = 0  # 缓存中的页面数量
 last_page = 0  # 最后获取成功的页面
-
 result = []  # 包含下一页的信息或者退出的信息
 
 # 正则表达式搜索定义
@@ -124,35 +123,36 @@ def get_data(page):
 
 def make_json(file_name):
     """创建json文件，判断是否覆盖，并初始化"""
-    if os.path.exists(file_name) and os.path.getsize(file_name):
-        if DATA_DROP:
-            with open(file_name, "w", encoding="utf-8") as file:
-                file.write("[")
-                # bool_override = input(
-                #         colored("文件 {} 已存在，是否覆盖？ [y/n (y)]\n>>>".format(
-                #                 file_name), "yellow"))
-                # if bool_override.lower() in ["y", "yes", "shi", "do", ""]:
-                #     with open(file_name, "w"): pass
+    FILE_EXISTS = os.path.exists(file_name)
+    if not DATA_DROP and FILE_EXISTS: return
+
+    with open(file_name, "w", encoding="utf-8") as file:
+        file.write("[  ")  # 加空格是为了在后面去掉
 
 
-def prepare_exit():
+def exit_handler():
     """处理退出必要的操作"""
-    global EXIT_FLAG, PAGE_EXCEEDED
+    global EXIT_FLAG
 
-    # 等待队列清空
-    page_queue.join()
-    update_queue.join()
-    download_queue.join()
+    try:
+        # 等待队列清空
+        page_queue.join()
+        update_queue.join()
+        download_queue.join()
 
-    # 通知线程已经结束
-    EXIT_FLAG = True
+        # 通知线程已经结束
+        EXIT_FLAG = True
 
-    # 终止线程
-    for t in working_page_threads:
-        t.join()
-    update_thread.join()
-    for t in working_downloader_threads:
-        t.join()
+        # 终止线程
+        for t in working_page_threads:
+            t.join()
+        update_thread.join()
+        for t in working_downloader_threads:
+            t.join()
+    finally:
+        print(colored("已经获取{}页数据 {}张图片，完成\n--- {} seconds ---".format(
+                last_page - start_page + 1, total_pic_count, perf_counter() - START_TIME), "magenta"))
+        exit()
 
 
 def extract_info(li):
@@ -175,7 +175,7 @@ def extract_info(li):
     # 默认大图的链接和图片实际分辨率
     direct_link_container = li.find("a", class_="directlink")
     pic.add(sample_img_URL=cut_base_url(direct_link_container["href"]),
-            direct_link_resolution=direct_link_container.span.span.text)
+            resolution=direct_link_container.span.span.text)
 
     # 添加图片长度和宽度以及index
     width, height = direct_link_container.span.span.text.split(" x ")
@@ -444,15 +444,16 @@ class PageThread(Thread):
 
     def __init__(self):
         super().__init__()
-        self.working_page = 0
+        self.working_page = 0  # 线程的工作页面
         self.html = None
         self.connect_time = 0  # 连接开始的时间
         self.pic_list = None  # 所有图片列表
+        self.parser_time = 0  # 处理页面消耗的时间
         # self.paginator = self.html.find("div", id="paginator")  # 页面导航栏
 
     def run(self):
         """线程执行"""
-        global PAGE_EXCEEDED, EXIT_FLAG
+        global PAGE_EXCEEDED
 
         # 程序没有退出而且没有达到最后一面
         while not EXIT_FLAG and not PAGE_EXCEEDED:
@@ -489,6 +490,7 @@ class PageThread(Thread):
         """从列表中获取信息"""
         global total_pic_count, cache_pages, last_page
         print(colored("{} 当前页面: {}".format(self.getName(), self.working_page), "blue"))
+        start_time = perf_counter()
         last_page = self.working_page
 
         for pic in pics_list:
@@ -502,7 +504,8 @@ class PageThread(Thread):
             pic_info = extract_info(pic)
 
             # 添加到待更新队列
-            update_queue.put(pic_info.information)
+            with QUEUE_LOCK:
+                update_queue.put(pic_info.information)
 
             # 打印当前信息
             print(pic_info.id, pic_info.information_link)
@@ -519,9 +522,11 @@ class PageThread(Thread):
 
             # 跳出条件检测
             if total_pic_count == pics_limit:
-                print(colored("\n连接时间: {}s 处理时间: {}s 本页获取: {} 缓存: {}/{} 已获取:{} {} s\n".format(
-                        self.connect_time, perf_counter() - get_time - self.connect_time,
-                        len(pics_list), cache_pages, cache_limit, total_pic_count, perf_counter() - get_time), "blue"))
+                break
+        self.parser_time = perf_counter() - start_time
+        print(colored("连接时间: {}s 处理时间: {}s 本页获取: {} 缓存: {}/{} 已获取:{} 总共: {}s\n".format(
+                self.connect_time, self.parser_time, len(pics_list), cache_pages, cache_limit, total_pic_count,
+                perf_counter() - START_TIME), "blue"))
 
 
 class UpdateThread(Thread):
@@ -550,15 +555,15 @@ class UpdateThread(Thread):
                 self.update_json(work)
                 self.update_database(work)
                 if cache_pages >= cache_limit:
-                    # 保存信息到json
-                    self.dump_json()
-                    self.json_body = []
+                    with QUEUE_LOCK:  # 锁定队列
+                        # 保存信息到json
+                        self.dump_json()
+                        self.json_body = []
 
-                    # 保存信息到sqlite3
-                    self.dump_database()
+                        # 保存信息到sqlite3
+                        self.dump_database()
 
-                    cache_pages = 0
-
+                        cache_pages = 0
                 update_queue.task_done()
         self.exit()
 
@@ -582,7 +587,6 @@ class UpdateThread(Thread):
     def init_local_database(self):
         """初始化本地数据库文件"""
         self.local_database = sqlite3.connect(database_file_name)  # 连接本地数据库
-
         if DATA_DROP:
             self.local_database.execute("DROP TABLE IF EXISTS konachan")
             self.local_database.executescript("".join(self.database.iterdump()))
@@ -617,11 +621,16 @@ class UpdateThread(Thread):
     def dump_json(self):
         """增量写入json文件"""
         start_time = perf_counter()
-        with open(json_file_name, "a", encoding="utf-8") as file:
-            json_data = json.dumps(self.json_body, indent=True,
-                                   ensure_ascii=False)  # 写入文件
-            json_data = json_data[2:-2]
-            file.write("\n" + json_data + ",")
+        with open(json_file_name, "rb+") as file:
+            json_data = json.dumps(self.json_body, indent=True, ensure_ascii=False)  # 写入文件
+            json_data = json_data[1:]
+
+            file.seek(-3, 2)
+            start = file.read(1)
+            if start == b"[":
+                file.write(json_data.encode())
+            else:
+                file.write(("," + json_data).encode())
         print(colored(
                 "写入 {} 完成… {} {}s".format(json_file_name, format_size(
                         os.path.getsize(json_file_name)),
@@ -652,9 +661,9 @@ class UpdateThread(Thread):
         self.dump_database()
         self.database.close()
         self.local_database.close()
-        with open(json_file_name, "rb+") as file:
-            file.seek(-1, 2)
-            file.write("\n]".encode())
+        # with open(json_file_name, "rb+") as file:
+        #     file.seek(-1, 2)
+        #     file.write("\n]".encode())
 
 
 if __name__ == "__main__":
@@ -711,6 +720,4 @@ if __name__ == "__main__":
         working_page += 1
 
     # 退出准备
-    prepare_exit()
-    print(colored("已经获取{}页数据 {}张图片，完成\n--- {} seconds ---".format(
-            last_page - start_page + 1, total_pic_count, perf_counter() - START_TIME), "magenta"))
+    exit_handler()

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-File name: konachan
+File name: yande
 Reference:
-Introduction: 下载konachan.com上面的图片的小爬虫
-Date: 2016-06-04
+Introduction: 下载yande.re上面的图片的小爬虫
+Date: 2016-06-27
 Last modified: 2016-06-28
 Author: enihsyou
 """
@@ -20,9 +20,9 @@ import requests
 from bs4 import BeautifulSoup
 
 # 参数定义(default)
-base_url = "http://konachan.com"
-json_file_name = "konachan.json"  # 保存信息的json文件名
-database_file_name = "konachan.sqlite3"  # 保存的sqlite3文件名
+base_url = "https://yande.re"
+json_file_name = "yande.json"  # 保存信息的json文件名
+database_file_name = "yande.sqlite3"  # 保存的sqlite3文件名
 large_img_dir_name = "images"  # 大图文件夹的名字
 thumb_dir_name = "thumb"  # 缩略图文件夹的名字
 start_page = 1  # 起始页面
@@ -31,7 +31,7 @@ page_limit = -1  # 限制获取的页面数量 (-1=无限)
 DOWNLOAD_LARGE_IMG = False  # 是否同时下载大图
 DOWNLOAD_THUMB = False  # 是否同时下载缩略图
 THREAD_WAITING_TIME = 0.5  # 线程获取数据的等待时间
-PROXY = "http://localhost:8087"  # 本地HTTP代理，使用GAE:8087
+PROXY = "http://localhost:1080"  # 本地HTTP代理，使用SS:1080
 DUPLICATE_OVERWRITE = True  # 遇到同名文件是否覆盖
 DATA_DROP = True  # 是否默认清除先前的数据 (default: True)
 cache_limit = 1000  # 写入文件需要达到的缓存数量
@@ -62,7 +62,7 @@ RE_PAGE_NUMBER = re.compile(r"page=(\d+)")  # 抓取出page，当前页数
 RE_PIC_ID = re.compile(r"\b(\d+)\b")  # 抓取出图片id
 RE_PICS_CLASS = re.compile(r"creator-id-\d*")  # 图片的所在位置的class
 # RE_BASE_URL = re.compile("^" + base_url)  # 用于去除http://hostname.xxx开头
-RE_HOST_NAME = re.compile(r"(?<=http://)?([^/]+?)\..+/?")  # 捕获次级域名
+RE_HOST_NAME = re.compile(r"(?<=://)?([^/]+?)\..+/?")  # 捕获次级域名
 RE_VALID_PATH = re.compile(r"[:<>\"/\\\|\?\*]")  # 替换有效文件路径
 
 # 字段定义
